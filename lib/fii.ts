@@ -16,8 +16,8 @@ const UA =
 const GROWW_FII_DII =
   "https://groww.in/v1/api/search/v3/query/fii_dii/st_fii_dii";
 
-const NSE_BULK = "https://archives.nseindia.com/content/equities/bulk.csv";
-const NSE_BLOCK = "https://archives.nseindia.com/content/equities/block.csv";
+const NSE_LARGE_DEALS =
+  "https://www.nseindia.com/api/snapshot-capital-market-largedeal";
 
 // -------- Types --------
 
@@ -113,6 +113,34 @@ const FII_PATTERNS: { tag: string; rx: RegExp }[] = [
   { tag: "Foreign Portfolio", rx: /FOREIGN PORTFOLIO INVESTOR|FPI\b/i },
   { tag: "Foreign Bank Custodian", rx: /CITI\s+.*CUSTODY|HSSC.*CUSTODY|STANDARD\s+CHARTERED.*CUSTODY/i },
   { tag: "Mylan (US)", rx: /\bMYLAN\b|VIATRIS/i },
+  { tag: "Franklin Templeton", rx: /FRANKLIN TEMPLETON/i },
+  { tag: "Invesco", rx: /INVESCO/i },
+  { tag: "Templeton", rx: /TEMPLETON/i },
+  { tag: "Aberdeen", rx: /ABERDEEN|ABRDN/i },
+  { tag: "Amundi", rx: /AMUNDI/i },
+  { tag: "Baillie Gifford", rx: /BAILLIE GIFFORD/i },
+  { tag: "Capital International", rx: /CAPITAL INTERNATIONAL/i },
+  { tag: "Citadel", rx: /CITADEL/i },
+  { tag: "DE Shaw", rx: /D\.?\s?E\.?\s?SHAW/i },
+  { tag: "Dimensional", rx: /DIMENSIONAL FUND/i },
+  { tag: "Ghisallo", rx: /GHISALLO/i },
+  { tag: "GQG Partners", rx: /GQG PARTNERS/i },
+  { tag: "Ishares / iShares", rx: /ISHARES/i },
+  { tag: "Jump Trading", rx: /JUMP TRADING/i },
+  { tag: "Lazard", rx: /LAZARD/i },
+  { tag: "Macquarie", rx: /MACQUARIE/i },
+  { tag: "Mirae Asset (Korea)", rx: /MIRAE ASSET(?!.*MUTUAL)/i },
+  { tag: "Nippon Life (Japan)", rx: /NIPPON LIFE INDIA/i },
+  { tag: "Nomura", rx: /NOMURA/i },
+  { tag: "Orbis", rx: /ORBIS/i },
+  { tag: "Pictet", rx: /PICTET/i },
+  { tag: "Robeco", rx: /ROBECO/i },
+  { tag: "SBI FM (Singapore)", rx: /SBI FUNDS MANAGEMENT.*SINGAPORE|SBI FM SINGAPORE/i },
+  { tag: "Societe Generale", rx: /SG SECURITIES|NEWEDGE/i },
+  { tag: "State Street", rx: /STATE STREET/i },
+  { tag: "Two Sigma", rx: /TWO SIGMA/i },
+  { tag: "Virtu Financial", rx: /VIRTU FINANCIAL/i },
+  { tag: "Warburg Pincus", rx: /WARBURG PINCUS/i },
   { tag: "NYSE/NASDAQ listed foreign", rx: /\bINC\.?$/i }, // weak catch-all
 ];
 
@@ -230,50 +258,59 @@ function toCr(qty: number, price: number): number {
   return (qty * price) / 1e7; // paise-aware if price is rupees; rupee * shares / 1e7
 }
 
-async function loadDealsFromCsv(
-  url: string,
-  kind: "bulk" | "block",
-): Promise<{ deals: Deal[]; sourceOk: boolean; note?: string }> {
+async function loadDealsFromApi(): Promise<{
+  bulkDeals: Deal[];
+  blockDeals: Deal[];
+  sourceOk: boolean;
+  note?: string;
+}> {
   let text: string;
   try {
-    text = await fetchText(url);
+    text = await fetchText(NSE_LARGE_DEALS);
   } catch (err) {
-    return { deals: [], sourceOk: false, note: String(err) };
+    return { bulkDeals: [], blockDeals: [], sourceOk: false, note: String(err) };
   }
-  const rows = parseCsv(text);
-  if (rows.length < 2) return { deals: [], sourceOk: true, note: "empty" };
-
-  // Find header row by looking for "Symbol"
-  const headerIdx = rows.findIndex((r) =>
-    r.some((c) => /Symbol/i.test(c)),
-  );
-  if (headerIdx < 0) return { deals: [], sourceOk: true, note: "no header" };
-
-  const dataRows = rows.slice(headerIdx + 1);
-  const deals: Deal[] = [];
-  for (const r of dataRows) {
-    if (r.length < 7) continue;
-    const [date, symbol, company, client, side, qtyS, priceS] = r;
-    if (!symbol) continue;
-    const qty = num(qtyS);
-    const price = num(priceS);
-    if (!qty || !price) continue;
-    const sideNorm = /SELL/i.test(side) ? "SELL" : "BUY";
-    const det = detectFII(client);
-    deals.push({
-      date,
-      symbol: symbol.trim(),
-      company: (company || "").trim(),
-      client: (client || "").trim(),
-      side: sideNorm,
-      qty,
-      price,
-      valueCr: toCr(qty, price),
-      isFII: det.isFII,
-      fiiTag: det.tag,
-    });
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return { bulkDeals: [], blockDeals: [], sourceOk: false, note: "JSON parse failed" };
   }
-  return { deals, sourceOk: true };
+
+  function parseEntries(arr: any[]): Deal[] {
+    const deals: Deal[] = [];
+    for (const r of arr) {
+      const symbol = (r.symbol || "").trim();
+      if (!symbol) continue;
+      const qty = num(r.qty);
+      const price = num(r.watp);
+      if (!qty || !price) continue;
+      const sideNorm = /SELL/i.test(r.buySell) ? "SELL" as const : "BUY" as const;
+      const det = detectFII(r.clientName || "");
+      deals.push({
+        date: r.date || "",
+        symbol,
+        company: (r.name || "").trim(),
+        client: (r.clientName || "").trim(),
+        side: sideNorm,
+        qty,
+        price,
+        valueCr: toCr(qty, price),
+        isFII: det.isFII,
+        fiiTag: det.tag,
+      });
+    }
+    return deals;
+  }
+
+  const bulkDeals = parseEntries(json.BULK_DEALS_DATA || []);
+  const blockDeals = parseEntries(json.BLOCK_DEALS_DATA || []);
+  return {
+    bulkDeals,
+    blockDeals,
+    sourceOk: true,
+    note: `bulk=${bulkDeals.length}, block=${blockDeals.length}`,
+  };
 }
 
 async function loadFiiDiiFlows(
@@ -387,16 +424,13 @@ export function sortBigMovers(rows: StockAggregate[]): StockAggregate[] {
 // -------- Main entrypoint --------
 
 export async function loadDashboard(): Promise<DashboardData> {
-  const [bulk, block, flowRes] = await Promise.all([
-    loadDealsFromCsv(NSE_BULK, "bulk"),
-    loadDealsFromCsv(NSE_BLOCK, "block"),
+  const [nseRes, flowRes] = await Promise.all([
+    loadDealsFromApi(),
     loadFiiDiiFlows(21),
   ]);
 
-  // Use whichever side returned the most rows when both work; usually identical.
-  const deals = (bulk.deals.length >= block.deals.length ? bulk.deals : block.deals);
-  const allDeals = [...bulk.deals, ...block.deals];
-  // Dedupe identical rows (bulk.csv and block.csv sometimes return same dataset).
+  const allDeals = [...nseRes.bulkDeals, ...nseRes.blockDeals];
+  // Dedupe identical rows (bulk and block sometimes overlap).
   const seen = new Set<string>();
   const dedup = allDeals.filter((d) => {
     const k = `${d.symbol}|${d.client}|${d.side}|${d.qty}|${d.price}|${d.date}`;
@@ -414,21 +448,21 @@ export async function loadDashboard(): Promise<DashboardData> {
     asOf: asOfDate,
     flows: flowRes.flows,
     todayFlow,
-    bulkDeals: bulk.deals,
-    blockDeals: block.deals,
+    bulkDeals: nseRes.bulkDeals,
+    blockDeals: nseRes.blockDeals,
     aggregated,
     bigMovers,
     fetchedAt: new Date().toISOString(),
     sources: [
       {
-        name: "NSE Archives — bulk.csv",
-        ok: bulk.sourceOk,
-        note: `${bulk.deals.length} rows${bulk.note ? ` (${bulk.note})` : ""}`,
+        name: "NSE API — bulk deals",
+        ok: nseRes.sourceOk,
+        note: `${nseRes.bulkDeals.length} rows${nseRes.note ? ` (${nseRes.note})` : ""}`,
       },
       {
-        name: "NSE Archives — block.csv",
-        ok: block.sourceOk,
-        note: `${block.deals.length} rows${block.note ? ` (${block.note})` : ""}`,
+        name: "NSE API — block deals",
+        ok: nseRes.sourceOk,
+        note: `${nseRes.blockDeals.length} rows${nseRes.note ? ` (${nseRes.note})` : ""}`,
       },
       {
         name: "Groww — FII/DII daily flows",
